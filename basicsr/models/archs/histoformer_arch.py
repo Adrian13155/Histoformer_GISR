@@ -271,19 +271,24 @@ class Histoformer(nn.Module):
     def __init__(self, 
         inp_channels=3, 
         out_channels=3, 
-        dim = 48,
-        num_blocks = [4,6,6,8], 
+        dim = 24,
+        num_blocks = [2,4,4,6], 
         num_refinement_blocks = 4,
         heads = [1,2,4,8],
-        ffn_expansion_factor = 2.66,
+        ffn_expansion_factor = 2.667,
         bias = False,
         LayerNorm_type = 'WithBias',   ## Other option 'BiasFree'
         dual_pixel_task = False        ## True for dual-pixel defocus deblurring only. Also set inp_channels=6
     ):
 
         super(Histoformer, self).__init__()
+        self.upMode = 'bilinear'  
 
-        self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
+        # self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
+
+        self.patch_embed_dep = OverlapPatchEmbed(4, dim)
+        self.patch_embed_mri = OverlapPatchEmbed(2, dim)
+        self.patch_embed_pan = OverlapPatchEmbed(5, dim)
 
         self.encoder_level1 = nn.Sequential(*[TransformerBlock(dim=dim, num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_blocks[0])])
         
@@ -311,12 +316,19 @@ class Histoformer(nn.Module):
         
         self.refinement = nn.Sequential(*[TransformerBlock(dim=int(dim*2**1), num_heads=heads[0], ffn_expansion_factor=ffn_expansion_factor, bias=bias, LayerNorm_type=LayerNorm_type) for i in range(num_refinement_blocks)])
 
-        self.skip_patch_embed1 = SkipPatchEmbed(3, 3)
-        self.skip_patch_embed2 = SkipPatchEmbed(3, 3)
-        self.skip_patch_embed3 = SkipPatchEmbed(3, 3)
-        self.reduce_chan_level_1 = Conv2d(int(dim*2**1)+3, int(dim*2**1), kernel_size=1, bias=bias)
-        self.reduce_chan_level_2 = Conv2d(int(dim*2**2)+3, int(dim*2**2), kernel_size=1, bias=bias)
-        self.reduce_chan_level_3 = Conv2d(int(dim*2**3)+3, int(dim*2**3), kernel_size=1, bias=bias)
+        # self.skip_patch_embed1 = SkipPatchEmbed(3, 8)
+        # self.skip_patch_embed1 = SkipPatchEmbed(3, 8)
+        self.skip_patch_embed_1_dep = SkipPatchEmbed(4, 6)
+        self.skip_patch_embed_1_mri = SkipPatchEmbed(2, 6)
+        self.skip_patch_embed_1_pan = SkipPatchEmbed(5, 6)
+        self.skip_patch_embed2 = SkipPatchEmbed(6, 6)
+        self.skip_patch_embed3 = SkipPatchEmbed(6, 6)
+        # self.reduce_chan_level_1 = Conv2d(int(dim*2**1)+3, int(dim*2**1), kernel_size=1, bias=bias)
+        self.reduce_chan_level_1_dep = Conv2d(int(dim*2**1)+6, int(dim*2**1), kernel_size=1, bias=bias)
+        self.reduce_chan_level_1_mri = Conv2d(int(dim*2**1)+6, int(dim*2**1), kernel_size=1, bias=bias)
+        self.reduce_chan_level_1_pan = Conv2d(int(dim*2**1)+6, int(dim*2**1), kernel_size=1, bias=bias)
+        self.reduce_chan_level_2 = Conv2d(int(dim*2**2)+6, int(dim*2**2), kernel_size=1, bias=bias)
+        self.reduce_chan_level_3 = Conv2d(int(dim*2**3)+6, int(dim*2**3), kernel_size=1, bias=bias)
 
         #### For Dual-Pixel Defocus Deblurring Task ####
         self.dual_pixel_task = dual_pixel_task
@@ -324,16 +336,41 @@ class Histoformer(nn.Module):
             self.skip_conv = Conv2d(dim, int(dim*2**1), kernel_size=1, bias=bias)
         ###########################
             
-        self.output = Conv2d(int(dim*2**1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
+        # self.output = Conv2d(int(dim*2**1), out_channels, kernel_size=3, stride=1, padding=1, bias=bias)
+        self.output_dep = Conv2d(int(dim*2**1), 1, kernel_size=3, stride=1, padding=1, bias=bias)
+        self.output_mri = Conv2d(int(dim*2**1), 1, kernel_size=3, stride=1, padding=1, bias=bias)
+        self.output_pan = Conv2d(int(dim*2**1), 4, kernel_size=3, stride=1, padding=1, bias=bias)
 
-    def forward(self, inp_img, ):
+    def forward(self, inp_ms, inp_pan):
+        _, C1, H1, W1 = inp_ms.shape
+        _, C2, H2, W2 = inp_pan.shape
 
-        inp_enc_level1 = self.patch_embed(inp_img)
+        inp_ms = F.interpolate(inp_ms,size=(H2,W2), mode = self.upMode)
+        inp_img = torch.concat([inp_ms, inp_pan],dim=1)
+
+        if C1+C2 == 4:  # depth
+            inp_enc_level1 = self.patch_embed_dep(inp_img)
+        elif C1+C2 ==2: # mri
+            inp_enc_level1 = self.patch_embed_mri(inp_img)
+        else:           # pan
+            inp_enc_level1 = self.patch_embed_pan(inp_img)
+
+        # inp_enc_level1 = self.patch_embed(inp_img)
         out_enc_level1 = self.encoder_level1(inp_enc_level1) # c,h,w
-
+        
         inp_enc_level2 = self.down1_2(out_enc_level1) # 2c, h/2, w/2
-        skip_enc_level1 = self.skip_patch_embed1(inp_img)
-        inp_enc_level2 = self.reduce_chan_level_1(torch.cat([inp_enc_level2, skip_enc_level1], 1))
+
+        if C1+C2 == 4:  # depth
+            skip_enc_level1 = self.skip_patch_embed_1_dep(inp_img)
+            inp_enc_level2 = self.reduce_chan_level_1_dep(torch.cat([inp_enc_level2, skip_enc_level1], 1))
+        elif C1+C2 ==2: # mri
+            skip_enc_level1 = self.skip_patch_embed_1_mri(inp_img)
+            inp_enc_level2 = self.reduce_chan_level_1_mri(torch.cat([inp_enc_level2, skip_enc_level1], 1))
+        else:           # pan
+            skip_enc_level1 = self.skip_patch_embed_1_pan(inp_img)
+            inp_enc_level2 = self.reduce_chan_level_1_pan(torch.cat([inp_enc_level2, skip_enc_level1], 1))
+        # skip_enc_level1 = self.skip_patch_embed1(inp_img)
+        # inp_enc_level2 = self.reduce_chan_level_1(torch.cat([inp_enc_level2, skip_enc_level1], 1))
 
         out_enc_level2 = self.encoder_level2(inp_enc_level2)
 
@@ -367,7 +404,49 @@ class Histoformer(nn.Module):
 
         ###########################
 
-        out_dec_level1 = self.output(out_dec_level1)
-        return out_dec_level1 + inp_img
+        # out_dec_level1 = self.output(out_dec_level1)
+        if C1+C2 == 4:  # depth
+            out_dec_level1 = self.output_dep(out_dec_level1)
+        elif C1+C2 ==2: # mri
+            out_dec_level1 = self.output_mri(out_dec_level1)
+        else:           # pan
+            out_dec_level1 = self.output_pan(out_dec_level1)
+        return out_dec_level1 + inp_ms
         
 
+def pearson_correlation_loss(x1, x2):
+        assert x1.shape == x2.shape
+        b, c = x1.shape[:2]
+        dim = -1
+        x1, x2 = x1.reshape(b, -1), x2.reshape(b, -1)
+        x1_mean, x2_mean = x1.mean(dim=dim, keepdims=True), x2.mean(dim=dim, keepdims=True)
+        numerator = ((x1 - x1_mean) * (x2 - x2_mean)).sum( dim=dim, keepdims=True )
+        
+        std1 = (x1 - x1_mean).pow(2).sum(dim=dim, keepdims=True).sqrt() 
+        std2 = (x2 - x2_mean).pow(2).sum(dim=dim, keepdims=True).sqrt()
+        denominator = std1 * std2
+        corr = numerator.div(denominator + 1e-6)
+        return corr
+
+if __name__ == '__main__':
+    import sys
+    sys.path.append("/home/cjj/projects/AIO_compare/Histoformer")
+    from basicsr.models.losses import L1Loss
+    torch.cuda.set_device(0)
+    lr = torch.randn(1,1,128,128).cuda()
+    guide = torch.randn(1,4,128,128).cuda()
+    gt = torch.randn(1,4,128,128).cuda()
+    model = Histoformer().cuda()
+    output = model(lr,guide)
+    print('Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
+    print("output:",output.shape)
+
+    cri_seq = pearson_correlation_loss
+    cri_pix = L1Loss(loss_weight = 1.0, reduction="mean")
+
+    seq_loss = cri_seq(output, gt)
+    pix_loss = cri_pix(output, gt)
+    print("seq_loss:", seq_loss)
+    print("pix_loss:", pix_loss)
+    loss = seq_loss + pix_loss
+    print("loss:", loss)

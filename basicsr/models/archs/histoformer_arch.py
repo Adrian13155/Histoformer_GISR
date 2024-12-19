@@ -431,22 +431,37 @@ def pearson_correlation_loss(x1, x2):
 if __name__ == '__main__':
     import sys
     sys.path.append("/home/cjj/projects/AIO_compare/Histoformer")
+    from loss.loss import  PerceptualLoss
     from basicsr.models.losses import L1Loss
     torch.cuda.set_device(0)
     lr = torch.randn(1,1,128,128).cuda()
-    guide = torch.randn(1,4,128,128).cuda()
-    gt = torch.randn(1,4,128,128).cuda()
+    guide = torch.randn(1,3,128,128).cuda()
+    gt = torch.randn(1,1,128,128).cuda()
     model = Histoformer().cuda()
     output = model(lr,guide)
     print('Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
     print("output:",output.shape)
 
-    cri_seq = pearson_correlation_loss
     cri_pix = L1Loss(loss_weight = 1.0, reduction="mean")
+    cri_perceptual = PerceptualLoss(layer_weights={'conv5_4': 1}, vgg_type="vgg19", use_input_norm=True,
+    range_norm=False, perceptual_weight=0.1, style_weight=0,criterion="l1")
 
-    seq_loss = cri_seq(output, gt)
     pix_loss = cri_pix(output, gt)
-    print("seq_loss:", seq_loss)
+
+    if gt.shape[1] == 4:
+        rgb_output = output[:,0:3,:,:]
+        rgb_gt = gt[:,0:3,:,:]
+        ir_output = output[:,3:4,:,:].repeat(1,3,1,1)
+        ir_gt = gt[:,3:4,:,:].repeat(1,3,1,1)
+        l_percep_rgb, l_style_rgb = cri_perceptual(rgb_output, rgb_gt)
+        l_percep_ir, l_style_ir =cri_perceptual(ir_output, ir_gt)
+        l_percep = l_percep_rgb + l_percep_ir
+    else:
+        output = output.repeat(1,3,1,1)
+        gt = gt.repeat(1,3,1,1)
+        l_percep, l_style = cri_perceptual(output, gt)
+
+    print("seq_loss:", l_percep)
     print("pix_loss:", pix_loss)
-    loss = seq_loss + pix_loss
+    loss = l_percep + pix_loss
     print("loss:", loss)
